@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping as MappingABC
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Union
+
+import pandas as pd
+from ntc_templates.parse import parse_output
 
 PathLike = Union[str, Path]
 SectionSplitter = Callable[[str], Optional[str]]
@@ -195,3 +199,147 @@ class SwitchLoreBase:
             parsed_sections[file_path] = sections
 
         self._sections = parsed_sections
+
+    def iter_sections(
+        self, commands: Optional[Sequence[str]] = None
+    ) -> Iterator[tuple[Path, str, str]]:
+        """Yield ``(file_path, section_name, content)`` tuples.
+
+        Parameters
+        ----------
+        commands:
+            Optional sequence of section names (commands) to yield. When
+            provided, only matching sections are returned in the order given
+            for every file. If omitted, all available sections for every file
+            are yielded.
+        """
+
+        if commands is None:
+            for file_path, sections in self.sections.items():
+                for section_name, content in sections.items():
+                    yield file_path, section_name, content
+            return
+
+        for file_path, sections in self.sections.items():
+            for command in commands:
+                content = sections.get(command)
+                if content is not None:
+                    yield file_path, command, content
+
+
+class SwitchLore(SwitchLoreBase):
+    """Extended ingestor that can parse sections into tabular data."""
+
+    def __init__(
+        self,
+        sources: Union[PathLike, Iterable[PathLike]],
+        extension: Optional[str] = None,
+        exclude: Optional[Sequence[str]] = None,
+        *,
+        auto_load: bool = True,
+    ) -> None:
+        super().__init__(sources, extension=extension, exclude=exclude)
+        if auto_load:
+            self.load_sections()
+
+    def _ensure_sections_loaded(self) -> None:
+        if not self.sections:
+            self.load_sections()
+
+    def query(
+        self,
+        commands: Sequence[str],
+        *,
+        platform: str = "cisco_ios",
+        include_raw: bool = False,
+        strict: bool = False,
+    ) -> pd.DataFrame:
+        """Return a :class:`pandas.DataFrame` with parsed command outputs.
+
+        Parameters
+        ----------
+        commands:
+            Sequence of command names (section titles) to parse.
+        platform:
+            Network operating system passed to
+            :func:`ntc_templates.parse.parse_output`.
+        include_raw:
+            When ``True``, include the raw command output for each row.
+        strict:
+            When ``True``, exceptions from :func:`parse_output` are raised.
+            Otherwise they are captured and returned as part of the dataframe.
+        """
+
+        if isinstance(commands, str):
+            raise TypeError("'commands' must be an iterable of command strings")
+
+        unique_commands: List[str] = []
+        seen = set()
+        for command in commands:
+            if not isinstance(command, str):
+                raise TypeError("All command names must be strings")
+            normalized = command.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_commands.append(normalized)
+
+        if not unique_commands:
+            raise ValueError("At least one command must be provided")
+
+        self._ensure_sections_loaded()
+
+        records: List[Dict[str, Any]] = []
+
+        for source_path, command, content in self.iter_sections(unique_commands):
+            try:
+                parsed_result = parse_output(
+                    platform=platform, command=command, data=content
+                )
+            except Exception as exc:  # noqa: BLE001 - surface parsing issues
+                if strict:
+                    raise
+                record: Dict[str, Any] = {
+                    "source": str(source_path),
+                    "command": command,
+                    "error": str(exc),
+                }
+                if include_raw:
+                    record["raw"] = content
+                records.append(record)
+                continue
+
+            if parsed_result is None:
+                parsed_rows: List[Any] = []
+            elif isinstance(parsed_result, list):
+                parsed_rows = parsed_result
+            else:
+                parsed_rows = [parsed_result]
+
+            if not parsed_rows:
+                record = {"source": str(source_path), "command": command}
+                if include_raw:
+                    record["raw"] = content
+                records.append(record)
+                continue
+
+            for row_data in parsed_rows:
+                row: Dict[str, Any] = {
+                    "source": str(source_path),
+                    "command": command,
+                }
+                if isinstance(row_data, MappingABC):
+                    row.update(row_data)
+                else:
+                    row["value"] = row_data
+                if include_raw:
+                    row["raw"] = content
+                records.append(row)
+
+        if records:
+            return pd.DataFrame.from_records(records)
+
+        base_columns = ["source", "command"]
+        if include_raw:
+            base_columns.append("raw")
+        return pd.DataFrame(columns=base_columns)
