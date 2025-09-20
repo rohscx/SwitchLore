@@ -152,7 +152,7 @@ class SwitchLoreBase:
         section_splitter: Optional[SectionSplitter] = None,
         *,
         encoding: str = "utf-8",
-    ) -> None:
+      
         """Parse configuration files into named sections.
 
         Parameters
@@ -166,10 +166,6 @@ class SwitchLoreBase:
             original :func:`parse_conf_file` helper.
         encoding:
             Text encoding used when reading configuration files.
-
-        The parsed data is stored on the :attr:`sections` property for later
-        access.
-        """
 
         splitter = section_splitter or self._default_section_splitter
         parsed_sections: SectionsByFile = {}
