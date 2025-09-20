@@ -28,5 +28,24 @@ The resulting dataframe keeps track of the originating file for each parsed row
 and leverages [`ntc-templates`](https://github.com/networktocode/ntc-templates)
 under the hood.
 
+### Handling Sections Without Templates
+
+Some configuration sections (such as interface blocks) do not have accompanying
+NTC templates. `SwitchLore.query` accepts structured specifications so you can
+request custom actions for those sections while keeping the API consistent.
+
+```python
+df = ingestor.query({
+    "section": "show running-config interface",
+    "action": "capture_interface_config",
+    "options": {"terminators": ["exit", "!"]},
+})
+```
+
+The resulting dataframe contains one row per interface with columns for the
+interface name, the captured configuration block, and the source file. You can
+mix these specifications with regular string commands (which default to
+`ntc_templates` parsing) to build richer automation workflows.
+
 ## Goal
 Provide a centralized, reusable toolkit for working with network switch configurations, enabling efficient analysis, documentation, and topology mapping.
