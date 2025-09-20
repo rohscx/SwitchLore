@@ -102,6 +102,20 @@ class TestSwitchLoreQuery(TestCase):
         self.assertIn("shutdown", config_values[2])
         self.assertNotIn("raw", df.columns)
 
+        gig1 = df[df["interface"] == "GigabitEthernet1/0/1"].iloc[0]
+        self.assertEqual(gig1["description"], "Uplink")
+        self.assertEqual(gig1["switchport access vlan"], "10")
+
+        vlan10 = df[df["interface"] == "Vlan10"].iloc[0]
+        self.assertEqual(
+            vlan10["ip address"],
+            "10.10.10.1 255.255.255.0",
+        )
+        self.assertFalse(vlan10["shutdown"])
+
+        gig2 = df[df["interface"] == "GigabitEthernet1/0/2"].iloc[0]
+        self.assertTrue(gig2["shutdown"])
+
     def test_capture_interface_config_with_alias_and_raw_column(self) -> None:
         """Aliases and ``include_raw`` interact correctly for interface capture."""
 
@@ -141,6 +155,12 @@ class TestSwitchLoreQuery(TestCase):
         self.assertEqual(df["raw"].iloc[0], df["configuration"].iloc[0])
         self.assertEqual(df["raw"].iloc[1], df["configuration"].iloc[1])
         self.assertNotEqual(df["raw"].iloc[0], df["raw"].iloc[1])
+
+        loopback = df[df["interface"] == "Loopback0"].iloc[0]
+        self.assertEqual(loopback["ip address"], "192.0.2.1 255.255.255.255")
+
+        ethernet = df[df["interface"] == "Ethernet1"].iloc[0]
+        self.assertEqual(ethernet["description"], "Test port")
 
     def test_query_accepts_single_mapping_specification(self) -> None:
         """A lone command mapping can be supplied without wrapping it in a list."""

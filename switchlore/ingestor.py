@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,154 @@ ActionHandler = Callable[
     [Path, str, str, bool, bool, str, Mapping[str, Any]],
     List[Dict[str, Any]],
 ]
+
+
+_VALUE_CHARS = set(".:/[]{}()-%")
+_VALUE_KEYWORDS = {
+    "auto",
+    "on",
+    "off",
+    "enable",
+    "disable",
+    "true",
+    "false",
+    "full",
+    "half",
+    "up",
+    "down",
+    "primary",
+    "secondary",
+    "active",
+    "passive",
+    "manual",
+    "dynamic",
+}
+
+
+def _tokenize_config_line(line: str) -> List[str]:
+    """Return tokens for ``line`` preserving quoted strings."""
+
+    lexer = shlex.shlex(line, posix=True)
+    lexer.commenters = ""
+    lexer.whitespace_split = True
+    return [token.strip() for token in lexer if token.strip()]
+
+
+def _looks_like_value(token: str) -> bool:
+    """Heuristic to determine if ``token`` represents a configuration value."""
+
+    if any(char.isdigit() for char in token):
+        return True
+    if any(char in _VALUE_CHARS for char in token):
+        return True
+    if token.upper() == token and token.lower() != token:
+        return True
+    if token.lower() in _VALUE_KEYWORDS:
+        return True
+    return False
+
+
+def _extract_config_item(line: str) -> Optional[tuple[str, Any]]:
+    """Return a configuration key/value pair derived from ``line``.
+
+    The returned key is a normalized command string while the value corresponds
+    to the command argument or a boolean flag when no explicit argument is
+    present. ``None`` is returned for empty/comment lines.
+    """
+
+    stripped = line.strip()
+    if not stripped or stripped.startswith("!"):
+        return None
+
+    normalized = re.sub(r"\s+", " ", stripped)
+    lowered = normalized.lower()
+
+    if lowered.startswith("no "):
+        remainder = normalized[3:].strip()
+        if not remainder:
+            return normalized, False
+        tokens = _tokenize_config_line(remainder)
+        if not tokens:
+            return remainder, False
+        if len(tokens) >= 2 and tokens[0].lower() in {"ip", "ipv6"} and tokens[1].lower() == "address":
+            key = " ".join(tokens[:2])
+        else:
+            key = " ".join(tokens)
+        return key, False
+
+    if lowered.startswith("default "):
+        remainder = normalized[len("default ") :].strip()
+        if not remainder:
+            return normalized, "default"
+        tokens = _tokenize_config_line(remainder)
+        if not tokens:
+            return remainder, "default"
+        if len(tokens) >= 2 and tokens[0].lower() in {"ip", "ipv6"} and tokens[1].lower() == "address":
+            key = " ".join(tokens[:2])
+        else:
+            key = " ".join(tokens)
+        return key, "default"
+
+    if ":" in normalized:
+        key, _, value = normalized.partition(":")
+        key = key.strip()
+        value = value.strip()
+        return key, value or True
+
+    tokens = _tokenize_config_line(normalized)
+    if not tokens:
+        return None
+
+    if len(tokens) == 1:
+        return tokens[0], True
+
+    if tokens[0].lower() in {"ip", "ipv6"} and len(tokens) >= 3 and tokens[1].lower() == "address":
+        key = " ".join(tokens[:2])
+        value = " ".join(tokens[2:])
+        return key, value or True
+
+    if len(tokens) == 2:
+        second = tokens[1]
+        if (
+            any(char.isdigit() for char in second)
+            or any(char.isupper() for char in second)
+            or second.lower() in _VALUE_KEYWORDS
+            or tokens[0].lower() in {"description", "alias", "name", "duplex", "speed"}
+        ):
+            return tokens[0], second
+        return " ".join(tokens), True
+
+    for index, token in enumerate(tokens[1:], start=1):
+        if any(char.isupper() for char in token) and token.lower() != token:
+            key = " ".join(tokens[:index])
+            value = " ".join(tokens[index:])
+            if key:
+                return key, value or True
+
+    key_tokens = tokens[:]
+    value_tokens: List[str] = []
+    while key_tokens:
+        candidate = key_tokens[-1]
+        if not value_tokens:
+            value_tokens.insert(0, candidate)
+            key_tokens.pop()
+            if not _looks_like_value(candidate):
+                break
+            continue
+        if _looks_like_value(candidate):
+            value_tokens.insert(0, candidate)
+            key_tokens.pop()
+        else:
+            break
+
+    if not key_tokens:
+        key = tokens[0]
+        value = " ".join(tokens[1:])
+        return key, value or True
+
+    key = " ".join(key_tokens)
+    value = " ".join(value_tokens)
+    return key, value or True
 
 
 _ACTION_ALIASES = {
@@ -583,6 +732,30 @@ class SwitchLore(SwitchLoreBase):
                 "interface": current_interface,
                 "configuration": configuration,
             }
+            item_columns: Dict[str, Any] = {}
+            seen_keys: Dict[str, int] = {}
+            for item_line in current_lines:
+                parsed_item = _extract_config_item(item_line)
+                if not parsed_item:
+                    continue
+                key, value = parsed_item
+                normalized_key = re.sub(r"\s+", " ", key.strip())
+                if not normalized_key:
+                    continue
+                occurrence = seen_keys.get(normalized_key, 0)
+                seen_keys[normalized_key] = occurrence + 1
+                if occurrence:
+                    column_name = f"{normalized_key}__{occurrence + 1}"
+                else:
+                    column_name = normalized_key
+                item_columns[column_name] = value
+            for column_name, value in item_columns.items():
+                candidate = column_name
+                suffix = 2
+                while candidate in record:
+                    candidate = f"{column_name}__{suffix}"
+                    suffix += 1
+                record[candidate] = value
             if include_raw:
                 record["raw"] = configuration
             records.append(record)
