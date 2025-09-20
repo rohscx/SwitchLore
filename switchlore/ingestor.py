@@ -151,7 +151,7 @@ class SwitchLoreBase:
         self,
         section_splitter: Optional[SectionSplitter] = None,
         *,
-        encoding: str = "utf-8",
+        encoding: str = "utf-8",)
       
         """Parse configuration files into named sections.
 
