@@ -152,7 +152,7 @@ class SwitchLoreBase:
         section_splitter: Optional[SectionSplitter] = None,
         *,
         encoding: str = "utf-8",
-    ) -> Mapping[Path, Mapping[str, str]]:
+      
         """Parse configuration files into named sections.
 
         Parameters
@@ -166,13 +166,6 @@ class SwitchLoreBase:
             original :func:`parse_conf_file` helper.
         encoding:
             Text encoding used when reading configuration files.
-
-        Returns
-        -------
-        Mapping[pathlib.Path, Mapping[str, str]]
-            A mapping of files to dictionaries containing their parsed
-            sections.
-        """
 
         splitter = section_splitter or self._default_section_splitter
         parsed_sections: SectionsByFile = {}
@@ -201,4 +194,3 @@ class SwitchLoreBase:
             parsed_sections[file_path] = sections
 
         self._sections = parsed_sections
-        return self.sections
