@@ -5,8 +5,21 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping as MappingABC
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Pattern,
+    Sequence,
+    Union,
+)
 
 import pandas as pd
 from ntc_templates.parse import parse_output
@@ -15,6 +28,36 @@ PathLike = Union[str, Path]
 SectionSplitter = Callable[[str], Optional[str]]
 SectionMapping = Dict[str, str]
 SectionsByFile = Dict[Path, SectionMapping]
+CommandSpec = Union[str, Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class CommandRequest:
+    """Normalized command specification consumed by :meth:`SwitchLore.query`."""
+
+    command: str
+    action: str = "parse"
+    options: Mapping[str, Any] = field(default_factory=dict)
+
+
+ActionHandler = Callable[
+    [Path, str, str, bool, bool, str, Mapping[str, Any]],
+    List[Dict[str, Any]],
+]
+
+
+_ACTION_ALIASES = {
+    "parse": "parse",
+    "ntc": "parse",
+    "ntc_parse": "parse",
+    "capture_interface_config": "capture_interface_config",
+    "capture_interface_configuration": "capture_interface_config",
+    "capture_interfaces": "capture_interface_config",
+    "interface_config": "capture_interface_config",
+    "interface_configuration": "capture_interface_config",
+}
+
+_SUPPORTED_ACTIONS = set(_ACTION_ALIASES.values())
 
 
 class SwitchLoreBase:
@@ -248,93 +291,80 @@ class SwitchLore(SwitchLoreBase):
 
     def query(
         self,
-        commands: Sequence[str],
+        commands: Union[CommandSpec, Sequence[CommandSpec]],
         *,
         platform: str = "cisco_ios",
         include_raw: bool = False,
         strict: bool = False,
     ) -> pd.DataFrame:
-        """Return a :class:`pandas.DataFrame` with parsed command outputs.
+        """Return a :class:`pandas.DataFrame` with processed command outputs.
 
         Parameters
         ----------
         commands:
-            Sequence of command names (section titles) to parse.
+            Command specification or sequence of specifications. Each entry
+            can be either a command name (section title) or a mapping
+            describing the section and the action to perform. For example::
+
+                [
+                    "show cdp neighbors detail",
+                    {
+                        "section": "show running-config interface",
+                        "action": "capture_interface_config",
+                        "options": {"terminators": ["exit"]},
+                    },
+                ]
+
+            Passing a single mapping without wrapping it in a list is also
+            supported. When omitted, ``action`` defaults to ``"parse"`` which
+            leverages :mod:`ntc_templates`.
+            Action mappings may include an ``"options"`` dictionary to pass
+            handler-specific keyword arguments.
         platform:
             Network operating system passed to
             :func:`ntc_templates.parse.parse_output`.
         include_raw:
             When ``True``, include the raw command output for each row.
         strict:
-            When ``True``, exceptions from :func:`parse_output` are raised.
+            When ``True``, exceptions from the ``parse`` action are raised.
             Otherwise they are captured and returned as part of the dataframe.
         """
 
-        if isinstance(commands, str):
-            raise TypeError("'commands' must be an iterable of command strings")
+        if isinstance(commands, MappingABC):
+            command_specs: Iterable[CommandSpec] = [commands]
+        else:
+            command_specs = commands
 
-        unique_commands: List[str] = []
-        seen = set()
-        for command in commands:
-            if not isinstance(command, str):
-                raise TypeError("All command names must be strings")
-            normalized = command.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            unique_commands.append(normalized)
+        if isinstance(command_specs, str):
+            raise TypeError(
+                "'commands' must be an iterable of command specifications"
+            )
 
-        if not unique_commands:
+        requests = self._normalize_command_requests(command_specs)
+
+        if not requests:
             raise ValueError("At least one command must be provided")
 
         self._ensure_sections_loaded()
 
         records: List[Dict[str, Any]] = []
 
-        for source_path, command, content in self.iter_sections(unique_commands):
-            try:
-                parsed_result = parse_output(
-                    platform=platform, command=command, data=content
+        for source_path, sections in self.sections.items():
+            for request in requests:
+                content = sections.get(request.command)
+                if content is None:
+                    continue
+                handler = self._resolve_action_handler(request.action)
+                new_records = handler(
+                    source_path,
+                    request.command,
+                    content,
+                    include_raw,
+                    strict,
+                    platform,
+                    request.options,
                 )
-            except Exception as exc:  # noqa: BLE001 - surface parsing issues
-                if strict:
-                    raise
-                record: Dict[str, Any] = {
-                    "source": str(source_path),
-                    "command": command,
-                    "error": str(exc),
-                }
-                if include_raw:
-                    record["raw"] = content
-                records.append(record)
-                continue
-
-            if parsed_result is None:
-                parsed_rows: List[Any] = []
-            elif isinstance(parsed_result, list):
-                parsed_rows = parsed_result
-            else:
-                parsed_rows = [parsed_result]
-
-            if not parsed_rows:
-                record = {"source": str(source_path), "command": command}
-                if include_raw:
-                    record["raw"] = content
-                records.append(record)
-                continue
-
-            for row_data in parsed_rows:
-                row: Dict[str, Any] = {
-                    "source": str(source_path),
-                    "command": command,
-                }
-                if isinstance(row_data, MappingABC):
-                    row.update(row_data)
-                else:
-                    row["value"] = row_data
-                if include_raw:
-                    row["raw"] = content
-                records.append(row)
+                records.extend(new_records)
 
         if records:
             return pd.DataFrame.from_records(records)
@@ -343,3 +373,251 @@ class SwitchLore(SwitchLoreBase):
         if include_raw:
             base_columns.append("raw")
         return pd.DataFrame(columns=base_columns)
+
+    def _normalize_command_requests(
+        self, commands: Iterable[CommandSpec]
+    ) -> List[CommandRequest]:
+        """Return validated command requests preserving the original order."""
+
+        requests: List[CommandRequest] = []
+        parse_seen: set[str] = set()
+
+        for spec in commands:
+            if isinstance(spec, str):
+                normalized = spec.strip()
+                if not normalized or normalized in parse_seen:
+                    continue
+                parse_seen.add(normalized)
+                requests.append(CommandRequest(command=normalized))
+                continue
+
+            if not isinstance(spec, MappingABC):
+                raise TypeError(
+                    "Command entries must be strings or mappings with a 'section'/'command' key"
+                )
+
+            if "section" in spec:
+                command_value = spec["section"]
+            elif "command" in spec:
+                command_value = spec["command"]
+            else:
+                raise ValueError(
+                    "Command mappings must include a 'section' or 'command' entry"
+                )
+
+            if not isinstance(command_value, str):
+                raise TypeError("Command names must be strings")
+
+            command_name = command_value.strip()
+            if not command_name:
+                raise ValueError("Command names must be non-empty strings")
+
+            action_value = spec.get("action", "parse")
+            if not isinstance(action_value, str):
+                raise TypeError("'action' must be a string when provided")
+
+            normalized_action = _ACTION_ALIASES.get(
+                action_value.strip().lower(), action_value.strip().lower()
+            )
+
+            if normalized_action not in _SUPPORTED_ACTIONS:
+                raise ValueError(f"Unsupported action '{action_value}'")
+
+            options_value = spec.get("options", {})
+            if options_value is None:
+                options_dict: Dict[str, Any] = {}
+            elif isinstance(options_value, MappingABC):
+                options_dict = dict(options_value)
+            else:
+                raise TypeError("'options' must be a mapping when provided")
+
+            if normalized_action == "parse" and not options_dict:
+                if command_name in parse_seen:
+                    continue
+                parse_seen.add(command_name)
+
+            requests.append(
+                CommandRequest(
+                    command=command_name,
+                    action=normalized_action,
+                    options=options_dict,
+                )
+            )
+
+        return requests
+
+    def _resolve_action_handler(self, action: str) -> ActionHandler:
+        """Return the callable responsible for ``action``."""
+
+        if action == "parse":
+            return self._handle_parse_action
+        if action == "capture_interface_config":
+            return self._handle_capture_interface_config
+        raise ValueError(f"Unsupported action '{action}'")
+
+    def _handle_parse_action(
+        self,
+        source_path: Path,
+        command: str,
+        content: str,
+        include_raw: bool,
+        strict: bool,
+        platform: str,
+        options: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Return records generated by :mod:`ntc_templates` parsing."""
+
+        records: List[Dict[str, Any]] = []
+        effective_platform = str(options.get("platform", platform))
+
+        try:
+            parsed_result = parse_output(
+                platform=effective_platform, command=command, data=content
+            )
+        except Exception as exc:  # noqa: BLE001 - surface parsing issues
+            if strict:
+                raise
+            record: Dict[str, Any] = {
+                "source": str(source_path),
+                "command": command,
+                "error": str(exc),
+            }
+            if include_raw:
+                record["raw"] = content
+            records.append(record)
+            return records
+
+        if parsed_result is None:
+            parsed_rows: List[Any] = []
+        elif isinstance(parsed_result, list):
+            parsed_rows = parsed_result
+        else:
+            parsed_rows = [parsed_result]
+
+        if not parsed_rows:
+            record = {"source": str(source_path), "command": command}
+            if include_raw:
+                record["raw"] = content
+            records.append(record)
+            return records
+
+        for row_data in parsed_rows:
+            row: Dict[str, Any] = {
+                "source": str(source_path),
+                "command": command,
+            }
+            if isinstance(row_data, MappingABC):
+                row.update(row_data)
+            else:
+                row["value"] = row_data
+            if include_raw:
+                row["raw"] = content
+            records.append(row)
+
+        return records
+
+    def _handle_capture_interface_config(
+        self,
+        source_path: Path,
+        command: str,
+        content: str,
+        include_raw: bool,
+        strict: bool,
+        platform: str,
+        options: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Capture interface configuration blocks from ``content``."""
+
+        del strict, platform  # parameters reserved for future use
+
+        pattern_value = options.get("interface_pattern")
+        if pattern_value is None:
+            interface_pattern: Pattern[str] = re.compile(
+                r"^interface\s+(.+)$", re.IGNORECASE
+            )
+        else:
+            if isinstance(pattern_value, str):
+                interface_pattern = re.compile(pattern_value, re.IGNORECASE)
+            elif isinstance(pattern_value, re.Pattern):
+                interface_pattern = pattern_value
+            else:
+                raise TypeError(
+                    "'interface_pattern' must be a string or compiled regular expression"
+                )
+
+        if getattr(interface_pattern, "groups", 0) < 1:
+            raise ValueError(
+                "'interface_pattern' must include at least one capturing group"
+            )
+
+        terminators_value = options.get("terminators")
+        if terminators_value is None:
+            terminators: set[str] = {"exit"}
+        else:
+            if not isinstance(terminators_value, Sequence) or isinstance(
+                terminators_value, (str, bytes)
+            ):
+                raise TypeError("'terminators' must be a sequence of strings")
+            terminators = {
+                str(term).strip().lower()
+                for term in terminators_value
+                if str(term).strip()
+            }
+
+        records: List[Dict[str, Any]] = []
+        current_interface: Optional[str] = None
+        current_header: Optional[str] = None
+        current_lines: List[str] = []
+
+        def flush() -> None:
+            nonlocal current_interface, current_header, current_lines
+            if current_interface is None:
+                return
+            header = (current_header or f"interface {current_interface}").rstrip()
+            block_lines = [header]
+            block_lines.extend(current_lines)
+            configuration = "\n".join(block_lines).strip("\n")
+            record: Dict[str, Any] = {
+                "source": str(source_path),
+                "command": command,
+                "interface": current_interface,
+                "configuration": configuration,
+            }
+            if include_raw:
+                record["raw"] = configuration
+            records.append(record)
+            current_interface = None
+            current_header = None
+            current_lines = []
+
+        for raw_line in content.splitlines():
+            stripped = raw_line.strip()
+            match = interface_pattern.match(stripped)
+            if match:
+                flush()
+                group_index = match.lastindex or 1
+                captured = match.group(group_index)
+                current_interface = captured.strip()
+                current_header = raw_line.rstrip()
+                current_lines = []
+                continue
+
+            if current_interface is None:
+                continue
+
+            lowered = stripped.lower()
+            if stripped.startswith("!") or lowered in terminators:
+                flush()
+                continue
+
+            current_lines.append(raw_line.rstrip())
+
+        flush()
+
+        if not records:
+            record = {"source": str(source_path), "command": command}
+            if include_raw:
+                record["raw"] = content
+            records.append(record)
+
+        return records
