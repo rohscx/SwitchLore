@@ -116,6 +116,34 @@ class TestSwitchLoreQuery(TestCase):
         gig2 = df[df["interface"] == "GigabitEthernet1/0/2"].iloc[0]
         self.assertTrue(gig2["shutdown"])
 
+    def test_capture_interface_config_preserves_colon_values(self) -> None:
+        """Interface values containing colons are not truncated."""
+
+        config_path = self._write_config(
+            [
+                "--- show running-config interface",
+                "interface GigabitEthernet1/0/3",
+                " description Link to ISP: Primary",
+                " ipv6 address 2001:db8::1/64",
+                "!",
+            ]
+        )
+
+        ingestor = SwitchLore(config_path)
+
+        df = ingestor.query(
+            {
+                "section": "show running-config interface",
+                "action": "capture_interface_config",
+            }
+        )
+
+        self.assertEqual(df["interface"].tolist(), ["GigabitEthernet1/0/3"])
+
+        interface = df.iloc[0]
+        self.assertEqual(interface["description"], "Link to ISP: Primary")
+        self.assertEqual(interface["ipv6 address"], "2001:db8::1/64")
+
     def test_capture_interface_config_with_alias_and_raw_column(self) -> None:
         """Aliases and ``include_raw`` interact correctly for interface capture."""
 
