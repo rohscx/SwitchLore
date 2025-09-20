@@ -134,10 +134,14 @@ def _extract_config_item(line: str) -> Optional[tuple[str, Any]]:
         return key, "default"
 
     if ":" in normalized:
-        key, _, value = normalized.partition(":")
-        key = key.strip()
-        value = value.strip()
-        return key, value or True
+        first_space = normalized.find(" ")
+        colon_index = normalized.find(":")
+        if first_space == -1 or colon_index < first_space:
+            key, _, value = normalized.partition(":")
+            key = key.strip()
+            value = value.strip()
+            if key:
+                return key, value or True
 
     tokens = _tokenize_config_line(normalized)
     if not tokens:
