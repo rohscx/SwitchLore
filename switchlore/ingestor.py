@@ -165,7 +165,7 @@ class SwitchLoreBase:
             ``"show "`` mark new sections, matching the behaviour of the
             original :func:`parse_conf_file` helper.
         encoding:
-            Text encoding used when reading configuration files.
+            Text encoding used when reading configuration files."""
 
         splitter = section_splitter or self._default_section_splitter
         parsed_sections: SectionsByFile = {}
