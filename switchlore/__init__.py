@@ -1,5 +1,5 @@
 """SwitchLore package initialization."""
 
-from .ingestor import SwitchLoreBase
+from .ingestor import SwitchLore, SwitchLoreBase
 
-__all__ = ["SwitchLoreBase"]
+__all__ = ["SwitchLoreBase", "SwitchLore"]
