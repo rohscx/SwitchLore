@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 PathLike = Union[str, Path]
+SectionSplitter = Callable[[str], Optional[str]]
+SectionMapping = Dict[str, str]
+SectionsByFile = Dict[Path, SectionMapping]
 
 
 class SwitchLoreBase:
@@ -110,6 +113,7 @@ class SwitchLoreBase:
         self._exclude = list(exclude or [])
         self._sources = sources
         self.files = self.ingest_files(sources, extension=extension, exclude=exclude)
+        self._sections: SectionsByFile = {}
 
     @property
     def extension(self) -> Optional[str]:
@@ -128,3 +132,73 @@ class SwitchLoreBase:
         """Return the original sources provided at initialization."""
 
         return self._sources
+
+    @property
+    def sections(self) -> Mapping[Path, Mapping[str, str]]:
+        """Return the parsed configuration sections."""
+
+        return self._sections
+
+    @staticmethod
+    def _default_section_splitter(line: str) -> Optional[str]:
+        """Return the section name if ``line`` denotes a new section."""
+
+        if line.startswith("---") and "show " in line:
+            return line.strip("- ").strip()
+        return None
+
+    def load_sections(
+        self,
+        section_splitter: Optional[SectionSplitter] = None,
+        *,
+        encoding: str = "utf-8",
+    ) -> Mapping[Path, Mapping[str, str]]:
+        """Parse configuration files into named sections.
+
+        Parameters
+        ----------
+        section_splitter:
+            Optional callable invoked for each line in the file. The callable
+            receives the line (with trailing whitespace removed) and should
+            return the section name when a new section starts, or ``None``
+            otherwise. If omitted, lines starting with ``"---"`` and containing
+            ``"show "`` mark new sections, matching the behaviour of the
+            original :func:`parse_conf_file` helper.
+        encoding:
+            Text encoding used when reading configuration files.
+
+        Returns
+        -------
+        Mapping[pathlib.Path, Mapping[str, str]]
+            A mapping of files to dictionaries containing their parsed
+            sections.
+        """
+
+        splitter = section_splitter or self._default_section_splitter
+        parsed_sections: SectionsByFile = {}
+
+        for file_path in self.files:
+            sections: SectionMapping = {}
+            current_section: Optional[str] = None
+            current_content: List[str] = []
+
+            with file_path.open("r", encoding=encoding) as file_obj:
+                for raw_line in file_obj:
+                    line = raw_line.rstrip()
+                    section_name = splitter(line)
+
+                    if section_name is not None:
+                        if current_section is not None:
+                            sections[current_section] = "\n".join(current_content)
+                        current_section = section_name
+                        current_content = []
+                    elif current_section is not None:
+                        current_content.append(line)
+
+                if current_section is not None and current_content:
+                    sections[current_section] = "\n".join(current_content)
+
+            parsed_sections[file_path] = sections
+
+        self._sections = parsed_sections
+        return self.sections
