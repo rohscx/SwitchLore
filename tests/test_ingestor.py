@@ -172,6 +172,41 @@ class TestSwitchLoreQuery(TestCase):
         self.assertEqual(interface["ip name-server"], "8.8.8.8")
         self.assertEqual(interface["ip helper-address"], "10.0.0.1")
 
+    def test_capture_interface_config_ignores_global_configuration(self) -> None:
+        """Global configuration following interface blocks is ignored."""
+
+        config_path = self._write_config(
+            [
+                "--- show running-config",
+                "hostname SwitchA",
+                "interface Ethernet1/1",
+                " description Uplink",
+                " switchport mode trunk",
+                "router bgp 65000",
+                " neighbor 10.0.0.1 remote-as 65010",
+                " address-family ipv4 unicast",
+                "  network 10.1.0.0/24 route-map EXPORT",
+                "line vty 0 4",
+                " login local",
+            ]
+        )
+
+        ingestor = SwitchLore(config_path)
+
+        df = ingestor.query(
+            {
+                "section": "show running-config",
+                "action": "capture_interface_config",
+            }
+        )
+
+        self.assertEqual(df["interface"].tolist(), ["Ethernet1/1"])
+        interface = df.iloc[0]
+        self.assertIn("switchport mode trunk", interface["configuration"])
+        self.assertNotIn("router bgp 65000", interface["configuration"])
+        self.assertNotIn("router bgp", df.columns)
+        self.assertNotIn("network 10.1.0.0/24 route-map", df.columns)
+
     def test_capture_interface_config_normalizes_numeric_tokens(self) -> None:
         """Numeric arguments do not produce unique column names."""
 
