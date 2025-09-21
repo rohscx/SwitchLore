@@ -66,6 +66,8 @@ _VALUE_KEYWORDS = {
     "passive",
     "manual",
     "dynamic",
+    "in",
+    "out",
 }
 
 
@@ -150,6 +152,11 @@ def _extract_config_item(line: str) -> Optional[tuple[str, Any]]:
     if len(tokens) == 1:
         return tokens[0], True
 
+    first_token_lower = tokens[0].lower()
+    if first_token_lower in {"description", "alias", "name"}:
+        value = " ".join(tokens[1:])
+        return tokens[0], value or True
+
     if tokens[0].lower() in {"ip", "ipv6"} and len(tokens) >= 3 and tokens[1].lower() == "address":
         key = " ".join(tokens[:2])
         value = " ".join(tokens[2:])
@@ -193,6 +200,21 @@ def _extract_config_item(line: str) -> Optional[tuple[str, Any]]:
         key = tokens[0]
         value = " ".join(tokens[1:])
         return key, value or True
+
+    if len(key_tokens) > 1:
+        normalized_key_tokens: List[str] = []
+        moved_tokens: List[str] = []
+        for index, token in enumerate(key_tokens):
+            if index == 0:
+                normalized_key_tokens.append(token)
+                continue
+            if _looks_like_value(token):
+                moved_tokens.append(token)
+            else:
+                normalized_key_tokens.append(token)
+        if moved_tokens:
+            key_tokens = normalized_key_tokens or key_tokens
+            value_tokens = moved_tokens + value_tokens
 
     key = " ".join(key_tokens)
     value = " ".join(value_tokens)
