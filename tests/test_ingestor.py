@@ -172,6 +172,36 @@ class TestSwitchLoreQuery(TestCase):
         self.assertEqual(interface["ip name-server"], "8.8.8.8")
         self.assertEqual(interface["ip helper-address"], "10.0.0.1")
 
+    def test_capture_interface_config_normalizes_numeric_tokens(self) -> None:
+        """Numeric arguments do not produce unique column names."""
+
+        config_path = self._write_config(
+            [
+                "--- show running-config interface",
+                "interface GigabitEthernet1/0/4",
+                " description Link to Core Switch",
+                " channel-group 11 mode active",
+                " ip access-group 101 in",
+                " ip access-group 102 out",
+                "!",
+            ]
+        )
+
+        ingestor = SwitchLore(config_path)
+
+        df = ingestor.query(
+            {
+                "section": "show running-config interface",
+                "action": "capture_interface_config",
+            }
+        )
+
+        interface = df[df["interface"] == "GigabitEthernet1/0/4"].iloc[0]
+        self.assertEqual(interface["description"], "Link to Core Switch")
+        self.assertEqual(interface["channel-group mode"], "11 active")
+        self.assertEqual(interface["ip access-group"], "101 in")
+        self.assertEqual(interface["ip access-group__2"], "102 out")
+
     def test_capture_interface_config_with_alias_and_raw_column(self) -> None:
         """Aliases and ``include_raw`` interact correctly for interface capture."""
 
