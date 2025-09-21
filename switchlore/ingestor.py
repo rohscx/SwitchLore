@@ -809,6 +809,10 @@ class SwitchLore(SwitchLoreBase):
                 flush()
                 continue
 
+            if raw_line and not raw_line[0].isspace():
+                flush()
+                continue
+
             current_lines.append(raw_line.rstrip())
 
         flush()
