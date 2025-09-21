@@ -47,7 +47,7 @@ ActionHandler = Callable[
 ]
 
 
-_VALUE_CHARS = set(".:/[]{}()-%")
+_VALUE_CHARS = set(".:/[]{}()%")
 _VALUE_KEYWORDS = {
     "auto",
     "on",

@@ -144,6 +144,34 @@ class TestSwitchLoreQuery(TestCase):
         self.assertEqual(interface["description"], "Link to ISP: Primary")
         self.assertEqual(interface["ipv6 address"], "2001:db8::1/64")
 
+    def test_capture_interface_config_handles_hyphenated_keywords(self) -> None:
+        """Hyphenated command keywords remain part of the column name."""
+
+        config_path = self._write_config(
+            [
+                "--- show running-config interface",
+                "interface Vlan200",
+                " ip domain-name example.com",
+                " ip name-server 8.8.8.8",
+                " ip helper-address 10.0.0.1",
+                "!",
+            ]
+        )
+
+        ingestor = SwitchLore(config_path)
+
+        df = ingestor.query(
+            {
+                "section": "show running-config interface",
+                "action": "capture_interface_config",
+            }
+        )
+
+        interface = df[df["interface"] == "Vlan200"].iloc[0]
+        self.assertEqual(interface["ip domain-name"], "example.com")
+        self.assertEqual(interface["ip name-server"], "8.8.8.8")
+        self.assertEqual(interface["ip helper-address"], "10.0.0.1")
+
     def test_capture_interface_config_with_alias_and_raw_column(self) -> None:
         """Aliases and ``include_raw`` interact correctly for interface capture."""
 
